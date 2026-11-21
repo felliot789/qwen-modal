@@ -1,0 +1,20 @@
+# Local runtime, downloaded weights, and build output
+.venv-modal/
+llama.cpp/
+models/
+qwen-control/target/
+qwen-gateway/target/
+__pycache__/
+*.py[cod]
+*.gguf
+*.log
+.codex-attachments/
+
+# Never track credentials or generated local configuration
+.env
+.env.*
+*.pem
+*.key
+*.token
+*.secret
+.modal.toml
