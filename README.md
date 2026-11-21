@@ -37,9 +37,13 @@ Pricing: [Modal](https://modal.com/pricing). See [resource billing](https://moda
 - Rust gateway (local only): `http://127.0.0.1:20129/v1`
 - Gateway liveness: `http://127.0.0.1:20129/healthz` (no GPU call)
 - Q8 model ID: `qwen38-hauhau-q8kp`
-- IQ4 model ID: `qwen38-hauhau-iq4xs` (also accepted on Q8 for legacy callers)
-- Existing VansRouter: `http://127.0.0.1:20128/v1`, model `mq8/qwen38-hauhau-q8kp`
-- VansRouter combo advertising the 128K window: `qwen-modal-q8-128k`
+- IQ4 model ID: `qwen38-hauhau-iq4xs` (only use with the IQ4 profile)
+- Existing VansRouter: `http://127.0.0.1:20128/v1`
+
+| Active profile | VansRouter model | 128K combo |
+| --- | --- | --- |
+| `q8` | `mq8/qwen38-hauhau-q8kp` | `qwen-modal-q8-128k` |
+| `iq4` | `mq8/qwen38-hauhau-iq4xs` | `qwen-modal-iq4-128k` |
 
 Use the gateway as the upstream to VansRouter. Pass the Modal proxy bearer
 token as the upstream API key. The gateway does not store or log that token;
@@ -56,10 +60,18 @@ claude --model mq8/qwen38-hauhau-q8kp --settings '{"env":{"CLAUDE_CODE_MAX_CONTE
 Set the client context window to `131072`, including prompt, history, and
 generation. Reserve room for the response when choosing the prompt length.
 
+The controller records the verified active profile in a local state file.
+The gateway refuses inference with a mismatched model ID or stopped state,
+preventing an accidental request on the more expensive profile. If you change
+the deployment outside the controller, run `qwen-modal start` for the desired
+profile to reconcile the local state. Use the matching router model or combo.
+
 The gateway only retries HTTP 503 **before** the upstream responds successfully.
 If a connection breaks after streaming has begun, the client gets the stream
 error rather than silently replaying a potentially expensive generation.
 Modal may still be unable to allocate a GPU when supply is exhausted.
+If the router times out waiting for cold capacity, run `qwen-modal start` and
+wait for its readiness confirmation before sending the next request.
 
 ## Build and install
 
@@ -103,3 +115,13 @@ prompt. Embedded MTP increased that to 35.12 tokens/s, using about 37.8 GiB of
 45.0 GiB VRAM. It recalled the test code correctly from a 127044-token
 synthetic prompt (127.3 s prefill, 30.27 tokens/s for the brief answer).
 These are fixture results, not guarantees of real coding-agent throughput.
+
+End-to-end verification through VansRouter and the Rust gateway also completed
+a cold-start Anthropic SSE request (HTTP 200, 46.2 s until first byte), then a
+cold-start OpenAI SSE request containing 127044 prompt tokens. The latter
+returned the correct recall code, completed with `[DONE]`, and took 178.6 s
+including GPU scheduling and model load. Cold start times vary with capacity.
+The IQ4 fallback also completed a cold streaming request through the gateway.
+After switching back to Q8, an Anthropic tool-use stream returned the expected
+tool name and arguments, the Q8 model ID, and `stop_reason: tool_use`; it took
+2.85 s after readiness. No tool was executed during the test.

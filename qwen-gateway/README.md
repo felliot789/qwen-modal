@@ -18,6 +18,10 @@ cargo build --locked --release
 - Pass the existing Modal proxy-token bearer or `Modal-Key` / `Modal-Secret`
   headers to the gateway as you would to the Modal endpoint. No credentials
   are stored or logged by the gateway.
+- The `qwen-modal` controller writes the active variant to
+  `~/.local/state/qwen-modal/variant`. Missing or stopped state rejects requests
+  locally; only the selected variant's model ID is accepted for inference.
+  Changing or stopping the variant also cancels pending cold-start retries.
 - Normal requests, authentication, and model availability are handled by
   Modal and llama.cpp. Non-503 errors are returned immediately. Accepted
   inference may run longer than the cold-start retry window.

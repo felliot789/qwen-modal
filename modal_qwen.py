@@ -12,7 +12,7 @@ app = modal.App("qwen38-27b")
 volume = modal.Volume.from_name("qwen38-27b-model", create_if_missing=False)
 VARIANT = os.environ.get("QWEN_VARIANT", "q8")
 VARIANTS = {
-    "q8": ("Q8_K_P", "L40S", "f16", "qwen38-hauhau-q8kp,qwen38-hauhau-iq4xs", "4e7735df4d1e2ec721f2551f531b815702a2f89123238c564797eda4b0304bc2"),
+    "q8": ("Q8_K_P", "L40S", "f16", "qwen38-hauhau-q8kp", "4e7735df4d1e2ec721f2551f531b815702a2f89123238c564797eda4b0304bc2"),
     "iq4": ("IQ4_XS", "L4", "q4_0", "qwen38-hauhau-iq4xs", "034b4c6b7c5cd9f4a2f99570d5097698f9d1e265a0fb000207223cbf9f9bd0b0"),
 }
 if VARIANT not in VARIANTS:

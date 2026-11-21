@@ -7,7 +7,10 @@ use axum::{
     routing::get,
 };
 use reqwest::Client;
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::{net::TcpListener, time::Instant};
 
 const UPSTREAM: &str = "https://makunku3--qwen38-27b-server.us-east.modal.direct";
@@ -18,8 +21,49 @@ const MAX_BODY: usize = 16 * 1024 * 1024;
 struct Gateway {
     upstream: String,
     client: Client,
+    state_path: PathBuf,
     retry_budget: Duration,
     retry_delay: Duration,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Variant {
+    Q8,
+    Iq4,
+}
+
+impl Variant {
+    fn model(self) -> &'static str {
+        match self {
+            Self::Q8 => "qwen38-hauhau-q8kp",
+            Self::Iq4 => "qwen38-hauhau-iq4xs",
+        }
+    }
+}
+
+fn read_variant(path: &Path) -> Option<Variant> {
+    match std::fs::read_to_string(path).ok()?.trim() {
+        "q8" => Some(Variant::Q8),
+        "iq4" => Some(Variant::Iq4),
+        _ => None,
+    }
+}
+
+fn model_matches(path: &str, body: &[u8], variant: Variant) -> Result<(), (StatusCode, String)> {
+    if matches!(
+        path.trim_end_matches('/'),
+        "/v1/chat/completions" | "/v1/messages" | "/v1/completions" | "/v1/responses"
+    ) {
+        let request: serde_json::Value = serde_json::from_slice(body)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Malformed JSON request".to_owned()))?;
+        if request.get("model").and_then(|m| m.as_str()) != Some(variant.model()) {
+            return Err((
+                StatusCode::CONFLICT,
+                format!("Active Qwen variant only accepts model {}", variant.model()),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn gateway_client() -> Result<Client, reqwest::Error> {
@@ -95,15 +139,34 @@ async fn forward(
         return (StatusCode::UNAUTHORIZED, "Modal credentials required").into_response();
     }
 
+    let Some(variant) = read_variant(&state.state_path) else {
+        return (
+            StatusCode::CONFLICT,
+            "Qwen deployment stopped; run qwen-modal start",
+        )
+            .into_response();
+    };
     let path = uri.path_and_query().map_or("/", |path| path.as_str());
-    let url = format!("{}{}", state.upstream, path);
+    let Ok(url) = reqwest::Url::parse(&format!("{}{}", state.upstream, path)) else {
+        return (StatusCode::BAD_REQUEST, "Invalid request path").into_response();
+    };
+    if let Err(error) = model_matches(url.path(), &body, variant) {
+        return error.into_response();
+    }
     let deadline = Instant::now() + state.retry_budget;
     let mut delay = state.retry_delay;
 
     loop {
+        if read_variant(&state.state_path) != Some(variant) {
+            return (
+                StatusCode::CONFLICT,
+                "Qwen deployment stopped or variant changed during retry",
+            )
+                .into_response();
+        }
         let response = match state
             .client
-            .request(method.clone(), &url)
+            .request(method.clone(), url.clone())
             .headers(headers.clone())
             .body(body.clone())
             .send()
@@ -135,9 +198,11 @@ async fn forward(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     let gateway = Gateway {
         upstream: UPSTREAM.into(),
         client: gateway_client()?,
+        state_path: PathBuf::from(home).join(".local/state/qwen-modal/variant"),
         retry_budget: Duration::from_secs(180),
         retry_delay: Duration::from_secs(1),
     };
@@ -153,11 +218,39 @@ mod tests {
     use futures_util::{StreamExt, stream};
     use std::{
         convert::Infallible,
+        fs::OpenOptions,
+        io::Write,
         sync::{
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
     };
+
+    struct TestState(PathBuf);
+
+    impl TestState {
+        fn new(variant: &str) -> Self {
+            static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "qwen-gateway-test-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::SeqCst)
+            ));
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(variant.as_bytes()).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestState {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
 
     async fn serve(app: Router) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -181,7 +274,7 @@ mod tests {
                     assert_eq!(uri.to_string(), "/v1/chat/completions?test=1");
                     assert_eq!(headers[header::AUTHORIZATION], "Bearer test-token");
                     assert!(!headers.contains_key("x-hop-only"));
-                    assert_eq!(body, "{\"stream\":true}");
+                    assert_eq!(body, "{\"model\":\"qwen38-hauhau-q8kp\",\"stream\":true}");
                     if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                         return (StatusCode::SERVICE_UNAVAILABLE, "cold").into_response();
                     }
@@ -202,9 +295,11 @@ mod tests {
         });
         let upstream = serve(mock).await;
         let client = gateway_client().unwrap();
+        let state_path = TestState::new("q8\n");
         let proxy = Gateway {
             upstream,
             client: client.clone(),
+            state_path: state_path.0.clone(),
             retry_budget: Duration::from_secs(2),
             retry_delay: Duration::from_millis(10),
         };
@@ -234,7 +329,7 @@ mod tests {
             .header(header::AUTHORIZATION, "Bearer test-token")
             .header(header::CONNECTION, "x-hop-only")
             .header("x-hop-only", "ignored")
-            .body("{\"stream\":true}")
+            .body("{\"model\":\"qwen38-hauhau-q8kp\",\"stream\":true}")
             .send()
             .await
             .unwrap();
@@ -281,9 +376,11 @@ mod tests {
         }))
         .await;
         let client = gateway_client().unwrap();
+        let state_path = TestState::new("q8\n");
         let local = serve(router(Gateway {
             upstream,
             client: client.clone(),
+            state_path: state_path.0.clone(),
             retry_budget: Duration::from_secs(2),
             retry_delay: Duration::from_millis(10),
         }))
@@ -320,9 +417,11 @@ mod tests {
         }))
         .await;
         let client = gateway_client().unwrap();
+        let state_path = TestState::new("q8\n");
         let local = serve(router(Gateway {
             upstream,
             client: client.clone(),
+            state_path: state_path.0.clone(),
             retry_budget: Duration::from_secs(5),
             retry_delay: Duration::from_millis(100),
         }))
@@ -338,6 +437,149 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         tokio::time::sleep(Duration::from_millis(350)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn stopped_and_mismatched_profiles_never_reach_upstream() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let upstream = serve(Router::new().fallback({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }
+        }))
+        .await;
+        let client = gateway_client().unwrap();
+        let state_path = TestState::new("q8\n");
+        let local = serve(router(Gateway {
+            upstream,
+            client: client.clone(),
+            state_path: state_path.0.clone(),
+            retry_budget: Duration::from_secs(2),
+            retry_delay: Duration::from_millis(10),
+        }))
+        .await;
+        let request = |path: &str, model| {
+            client
+                .post(format!("{local}{path}"))
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .body(format!("{{\"model\":\"{model}\"}}"))
+        };
+
+        for path in [
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/completions",
+            "/v1/responses",
+        ] {
+            assert_eq!(
+                request(path, "qwen38-hauhau-iq4xs")
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::CONFLICT
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            request("/v1/chat/completions", "qwen38-hauhau-q8kp")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        std::fs::write(&state_path.0, "iq4\n").unwrap();
+        assert_eq!(
+            request("/v1/messages", "qwen38-hauhau-q8kp")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            request("/v1/messages", "qwen38-hauhau-iq4xs")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        std::fs::write(&state_path.0, "stopped\n").unwrap();
+        assert_eq!(
+            request("/v1/models", "qwen38-hauhau-iq4xs")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        std::fs::remove_file(&state_path.0).unwrap();
+        assert_eq!(
+            request("/v1/models", "qwen38-hauhau-iq4xs")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            client
+                .get(format!("{local}/healthz"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_stops_when_profile_is_disabled() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let upstream = serve(Router::new().fallback({
+            let calls = calls.clone();
+            let started = started.clone();
+            move || {
+                let calls = calls.clone();
+                let started = started.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    started.notify_one();
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }
+        }))
+        .await;
+        let client = gateway_client().unwrap();
+        let state_path = TestState::new("q8\n");
+        let local = serve(router(Gateway {
+            upstream,
+            client: client.clone(),
+            state_path: state_path.0.clone(),
+            retry_budget: Duration::from_secs(5),
+            retry_delay: Duration::from_millis(100),
+        }))
+        .await;
+        let task = tokio::spawn(async move {
+            client
+                .get(local)
+                .header(header::AUTHORIZATION, "Bearer test-token")
+                .send()
+                .await
+        });
+        started.notified().await;
+        std::fs::write(&state_path.0, "stopped\n").unwrap();
+        assert_eq!(task.await.unwrap().unwrap().status(), StatusCode::CONFLICT);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

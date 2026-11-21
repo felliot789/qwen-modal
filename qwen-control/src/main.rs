@@ -1,9 +1,11 @@
 use serde_json::Value;
 use std::{
-    env,
+    env, fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
     process::{Command, ExitCode, Output},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const APP: &str = "qwen38-27b";
@@ -45,9 +47,74 @@ impl Variant {
     }
 }
 
+fn state_path() -> Result<PathBuf, String> {
+    let home = env::var_os("HOME").ok_or("HOME is not set")?;
+    Ok(PathBuf::from(home).join(".local/state/qwen-modal/variant"))
+}
+
+fn write_state(path: &Path, state: &str) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("Missing state directory"))?;
+    fs::create_dir_all(dir)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp = dir.join(format!(".variant-{}-{stamp}.tmp", std::process::id()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let result = (|| {
+        writeln!(file, "{state}")?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        fs::File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result
+}
+
+fn set_gateway_state(variant: Option<Variant>) -> Result<(), String> {
+    let path = state_path()?;
+    write_state(&path, variant.map_or("stopped", Variant::name))
+        .map_err(|e| format!("Cannot update gateway state {}: {e}", path.display()))
+}
+
+fn show_gateway_state(expected: Option<Variant>) {
+    let actual = state_path()
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok());
+    let state = match actual.as_deref().map(str::trim) {
+        Some("q8") => "q8",
+        Some("iq4") => "iq4",
+        Some("stopped") => "stopped",
+        _ => "unavailable (requests blocked)",
+    };
+    println!("Gateway state: {state}");
+    if state != expected.map_or("stopped", Variant::name) {
+        eprintln!(
+            "Gateway state differs from the Modal deployment. Run qwen-modal start or stop to reconcile it."
+        );
+    }
+}
+
 fn modal_command(args: &[&str], variant: Option<Variant>) -> Result<Output, String> {
     let home = env::var("HOME").map_err(|_| "HOME is not set")?;
-    let mut command = Command::new(format!("{home}/local-llm/.venv-modal/bin/modal"));
+    // Bound control-plane calls as well as HTTP requests; a network hiccup must
+    // not leave start/status/stop hanging indefinitely.
+    let limit = if args.first() == Some(&"deploy") {
+        "120s"
+    } else {
+        "45s"
+    };
+    let mut command = Command::new("timeout");
+    command.args(["--kill-after=5s", limit]);
+    command.arg(format!("{home}/local-llm/.venv-modal/bin/modal"));
     if let Some(variant) = variant {
         command.env("QWEN_VARIANT", variant.name());
     }
@@ -64,6 +131,8 @@ fn modal_command(args: &[&str], variant: Option<Variant>) -> Result<Output, Stri
         .map_err(|e| format!("Cannot run Modal client: {e}"))?;
     if output.status.success() {
         Ok(output)
+    } else if output.status.code() == Some(124) {
+        Err(format!("Modal control-plane call timed out after {limit}."))
     } else {
         Err(format!(
             "Modal command failed: {}",
@@ -236,7 +305,11 @@ fn run() -> Result<(), String> {
                             "200" => {
                                 let response: Value = serde_json::from_str(json)
                                     .map_err(|e| format!("Invalid model response: {e}"))?;
-                                if model_ready(&response, variant)? {
+                                let ready = model_ready(&response, variant).inspect_err(|_| {
+                                    let _ = set_gateway_state(None);
+                                })?;
+                                if ready {
+                                    set_gateway_state(Some(variant))?;
                                     println!(
                                         "Ready in {:.1}s.\nAPI: {url}/v1\nModel: {}\nContext: {CONTEXT} tokens\nGPU: {}. Sleeps after {IDLE_SECONDS}s idle.\nUse `qwen-modal stop` to disable the app.",
                                         started.elapsed().as_secs_f64(),
@@ -247,7 +320,9 @@ fn run() -> Result<(), String> {
                                 }
                             }
                             "401" | "403" => {
-                                return Err(format!("Modal authentication failed (HTTP {status})."));
+                                return Err(format!(
+                                    "Modal authentication failed (HTTP {status})."
+                                ));
                             }
                             "404" => return Err("Modal server URL was not found.".into()),
                             _ => last_error = format!("HTTP {status}"),
@@ -269,6 +344,8 @@ fn run() -> Result<(), String> {
             ));
         }
         "stop" => {
+            // Disable new gateway requests first, including during a Modal outage.
+            set_gateway_state(None)?;
             let apps = json_command(&["app", "list", "--json"])?;
             if let Some((id, state)) = target_app(&apps)? {
                 if state == "deployed" {
@@ -310,9 +387,16 @@ fn run() -> Result<(), String> {
                 if let Err(e) = validate_server(&info, variant) {
                     eprintln!("Warning: {e}");
                 }
+                show_gateway_state(Some(variant));
             }
-            Some((id, _)) => println!("App: stopping\nActive containers: {}", containers(id)?),
-            None => println!("App: stopped"),
+            Some((id, _)) => {
+                println!("App: stopping\nActive containers: {}", containers(id)?);
+                show_gateway_state(None);
+            }
+            None => {
+                println!("App: stopped");
+                show_gateway_state(None);
+            }
         },
         "help" | "--help" | "-h" => println!(
             "Usage: qwen-modal start [q8|iq4] | stop | status\n\nStart defaults to Q8 on L40S; IQ4 on L4 is a cheaper fallback.\nStop disables the app and interrupts active requests; stop first to change variants.\nThe GPU scales to zero automatically after 30 seconds idle."
@@ -339,6 +423,26 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_is_replaced_without_leaving_temp_files() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = env::temp_dir().join(format!("qwen-modal-test-{}-{stamp}", std::process::id()));
+        let path = dir.join("variant");
+        write_state(&path, "q8").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "q8\n");
+        write_state(&path, "iq4").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "iq4\n");
+        write_state(&path, "stopped").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "stopped\n");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
     #[test]
     fn picks_only_the_active_target_app() {
         let apps = serde_json::json!([
