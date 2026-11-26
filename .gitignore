@@ -2,8 +2,7 @@
 .venv-modal/
 llama.cpp/
 models/
-qwen-control/target/
-qwen-gateway/target/
+target/
 __pycache__/
 *.py[cod]
 *.gguf

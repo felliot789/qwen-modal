@@ -52,6 +52,14 @@ fn state_path() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(".local/state/qwen-modal/variant"))
 }
 
+fn project_root() -> Result<PathBuf, String> {
+    if let Some(root) = env::var_os("LOCAL_LLM_ROOT") {
+        return Ok(PathBuf::from(root));
+    }
+    let home = env::var_os("HOME").ok_or("HOME is not set")?;
+    Ok(PathBuf::from(home).join("local-llm"))
+}
+
 fn write_state(path: &Path, state: &str) -> io::Result<()> {
     let dir = path
         .parent()
@@ -104,7 +112,7 @@ fn show_gateway_state(expected: Option<Variant>) {
 }
 
 fn modal_command(args: &[&str], variant: Option<Variant>) -> Result<Output, String> {
-    let home = env::var("HOME").map_err(|_| "HOME is not set")?;
+    let root = project_root()?;
     // Bound control-plane calls as well as HTTP requests; a network hiccup must
     // not leave start/status/stop hanging indefinitely.
     let limit = if args.first() == Some(&"deploy") {
@@ -114,7 +122,7 @@ fn modal_command(args: &[&str], variant: Option<Variant>) -> Result<Output, Stri
     };
     let mut command = Command::new("timeout");
     command.args(["--kill-after=5s", limit]);
-    command.arg(format!("{home}/local-llm/.venv-modal/bin/modal"));
+    command.arg(root.join(".venv-modal/bin/modal"));
     if let Some(variant) = variant {
         command.env("QWEN_VARIANT", variant.name());
     }
@@ -261,12 +269,10 @@ fn run() -> Result<(), String> {
             let variant = Variant::parse(args.get(1).map(String::as_str))?;
             match target_app(&json_command(&["app", "list", "--json"])?)? {
                 None => {
-                    let home = env::var("HOME").map_err(|_| "HOME is not set")?;
+                    let deployment = project_root()?.join("modal/modal_qwen.py");
+                    let deployment = deployment.to_str().ok_or("Checkout path must be UTF-8")?;
                     println!("Deploying {} on {}...", variant.name(), variant.gpu());
-                    modal_command(
-                        &["deploy", &format!("{home}/local-llm/modal_qwen.py")],
-                        Some(variant),
-                    )?;
+                    modal_command(&["deploy", deployment], Some(variant))?;
                 }
                 Some((_, "stopping")) => {
                     return Err("The app is still stopping; try again shortly.".into());
