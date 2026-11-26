@@ -3,7 +3,72 @@
 Single-user, authenticated Qwen3.8-27B inference for the homelab. The Rust
 controller manages deployment and shutdown; the Rust loopback gateway handles
 Modal cold starts and passes through streamed responses. CUDA inference runs
-directly in llama.cpp. Python is only the Modal SDK's deployment/lifecycle shim.
+directly in llama.cpp. The Modal deployment uses Python for its SDK lifecycle shim.
+
+## Local hardware monitor and GGUF runner
+
+From this checkout on the Linux host, run `python3 monitor/server.py` and
+open [the local dashboard](http://127.0.0.1:8790). It uses Python 3.10+ and
+samples CPU, AMD GPU, RAM, and available temperature, fan, and component power
+sensors every two seconds. It retains two minutes of utilization history in
+memory. GPU sensors come from the AMD driver and CPU or DRAM power uses readable
+Linux RAPL counters. Wall power requires a separate meter.
+
+The runner scans `~/models` for GGUFs, including complete split models. Choose a
+model and adjust context, threads, or GPU layers before starting. Zero GPU layers
+uses CPU only. The binary is picked from `~/llama.cpp/build/bin/llama-server` or
+`PATH`. Use `--llama-server /path/to/llama-server` to select another compatible
+build or `--models-dir /path/to/models` to include another directory.
+
+The model's web UI and API are available on port `8791` once ready. The
+dashboard controls one model server at a time and stops it when the dashboard
+process exits normally. Other local llama-server processes are listed for
+visibility. Use `--port` and `--model-port` if the defaults are occupied.
+
+Both listeners bind to loopback. To open them from another machine, forward
+both ports with `ssh -N -L 8790:127.0.0.1:8790 -L 8791:127.0.0.1:8791 user@host`,
+then open the same dashboard URL on that machine.
+
+For Tailscale access, start the monitor with
+`python3 monitor/server.py --tailnet-host <your MagicDNS hostname>` and run:
+
+```sh
+tailscale serve --bg --https=8790 http://127.0.0.1:8790
+tailscale serve --bg --https=8791 http://127.0.0.1:8790
+```
+
+Open `https://<your MagicDNS hostname>:8790` from a tailnet device. The model
+UI and API on HTTPS port `8791` go through the monitor's proxy to the local
+model server. Use the matching ports in the Serve commands if you customize
+the monitor or model port.
+
+For a direct address that works without MagicDNS, add
+`--tailnet-ip "$(tailscale ip -4)"` when starting the monitor, then run:
+
+```sh
+tailscale serve --bg --tcp=8789 tcp://127.0.0.1:8790
+tailscale serve --bg --tcp=8788 tcp://127.0.0.1:8790
+```
+
+Open `http://<Tailscale IPv4>:8789` in the browser. The connections use HTTP
+inside the encrypted Tailscale network. Port `8788` serves the model UI and API
+once a model is ready.
+
+To display the connection details for an existing no-key chat server, start
+the monitor with `--api-base-url http://<Tailscale IPv4>:<API port>/v1`.
+The dashboard checks `/v1/models` and shows the model ID for use with
+`POST /v1/chat/completions`. This chat server can run independently of the
+dashboard's GGUF runner.
+
+For a public Funnel URL, render `monitor/public-api.nginx.conf` with
+`LLAMA_UPSTREAM` set to the running llama-server's host and port. The proxy
+listens on loopback port `8792` and forwards model discovery and one concurrent
+chat completion. Mount it at `/local-llm` on a Funnel hostname with
+`tailscale funnel --bg --https=443 --set-path=/local-llm http://127.0.0.1:8792`.
+Set the monitor's base URL to `https://<Funnel hostname>/local-llm/v1`.
+
+Run `python3 -m unittest discover -s monitor` to test model discovery and power
+counter handling.
 
 ## Daily use
 

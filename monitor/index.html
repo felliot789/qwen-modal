@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Local LLM Monitor</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <span class="brand">Local LLM</span>
+      <nav aria-label="Dashboard">
+        <a href="#hardware">Hardware</a>
+        <a id="chat-api-nav" href="#chat-api" hidden>API</a>
+        <a href="#runner">GGUF runner</a>
+      </nav>
+      <span id="connection" class="status" data-state="loading" role="status">Connecting</span>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section id="hardware" aria-labelledby="heading">
+      <div class="section-heading">
+        <div>
+          <h1 id="heading">System monitor</h1>
+          <p id="host" class="muted">Reading this host…</p>
+        </div>
+        <p class="muted sample-info">Updates every 2 seconds</p>
+      </div>
+
+      <div class="hardware-panel">
+        <section class="hardware-cell" aria-labelledby="cpu-heading">
+          <h2 id="cpu-heading">CPU</h2>
+          <p class="device" id="cpu-name">Processor</p>
+          <div class="metric"><span>Utilization</span><strong id="cpu-usage">–</strong></div>
+          <div class="plot">
+            <div class="axis" aria-hidden="true"><span>100%</span><span>50%</span><span>0%</span></div>
+            <canvas id="cpu-chart" role="img" aria-label="CPU utilization over the last two minutes"></canvas>
+          </div>
+          <div class="plot-time" aria-hidden="true"><span>2 min ago</span><span>Now</span></div>
+          <dl class="readings">
+            <div><dt>Package temp</dt><dd id="cpu-temp">–</dd></div>
+            <div><dt>Average clock</dt><dd id="cpu-clock">–</dd></div>
+            <div><dt>Load average (1 min)</dt><dd id="cpu-load">–</dd></div>
+          </dl>
+          <details class="hardware-details">
+            <summary>Core and thread readings</summary>
+            <dl id="cpu-cores" class="readings"></dl>
+            <ol id="cpu-threads" class="threads" aria-label="Logical CPU utilization"></ol>
+          </details>
+        </section>
+        <section class="hardware-cell" aria-labelledby="gpu-heading">
+          <h2 id="gpu-heading">GPU</h2>
+          <p class="device" id="gpu-name">Graphics adapter</p>
+          <div class="metric"><span>Utilization</span><strong id="gpu-usage">–</strong></div>
+          <div class="plot">
+            <div class="axis" aria-hidden="true"><span>100%</span><span>50%</span><span>0%</span></div>
+            <canvas id="gpu-chart" role="img" aria-label="GPU utilization over the last two minutes"></canvas>
+          </div>
+          <div class="plot-time" aria-hidden="true"><span>2 min ago</span><span>Now</span></div>
+          <dl class="readings">
+            <div><dt>Edge / hotspot</dt><dd id="gpu-temp">–</dd></div>
+            <div><dt>VRAM</dt><dd id="vram">–</dd></div>
+            <div><dt>GPU fan</dt><dd id="gpu-fan">–</dd></div>
+          </dl>
+          <details class="hardware-details">
+            <summary>Clock and memory readings</summary>
+            <dl class="readings">
+              <div><dt>Core clock</dt><dd id="gpu-clock">–</dd></div>
+              <div><dt>Memory temp</dt><dd id="gpu-mem-temp">–</dd></div>
+              <div><dt>Memory controller load</dt><dd id="gpu-mem-load">–</dd></div>
+            </dl>
+          </details>
+        </section>
+        <section class="hardware-cell" aria-labelledby="ram-heading">
+          <h2 id="ram-heading">RAM</h2>
+          <p class="device">System memory</p>
+          <div class="metric"><span>In use</span><strong id="ram-usage">–</strong></div>
+          <div class="plot">
+            <div class="axis" aria-hidden="true"><span>100%</span><span>50%</span><span>0%</span></div>
+            <canvas id="ram-chart" role="img" aria-label="RAM utilization over the last two minutes"></canvas>
+          </div>
+          <div class="plot-time" aria-hidden="true"><span>2 min ago</span><span>Now</span></div>
+          <dl class="readings">
+            <div><dt>Used / total</dt><dd id="ram-size">–</dd></div>
+            <div><dt>Available</dt><dd id="ram-free">–</dd></div>
+            <div><dt>Swap used / total</dt><dd id="ram-swap">–</dd></div>
+          </dl>
+          <details class="hardware-details">
+            <summary>Memory temperature</summary>
+            <dl class="readings">
+              <div><dt>Hottest DIMM</dt><dd id="ram-temp">–</dd></div>
+            </dl>
+          </details>
+        </section>
+      </div>
+
+      <div class="power-panel">
+        <div class="power-heading">
+          <h2>Power draw</h2>
+          <p class="muted">Component sensors</p>
+        </div>
+        <dl class="power-readings">
+          <div><dt>CPU package</dt><dd id="cpu-watts">–</dd><dd id="cpu-watts-note" class="muted"></dd></div>
+          <div><dt>GPU</dt><dd id="gpu-watts">–</dd></div>
+          <div><dt>RAM</dt><dd id="ram-watts">–</dd><dd id="ram-watts-note" class="muted"></dd></div>
+          <div><dt>Wall power</dt><dd>Unavailable</dd><dd class="muted">Requires a separate meter</dd></div>
+        </dl>
+      </div>
+      <div id="board-fans" class="board-fans muted" hidden></div>
+    </section>
+
+    <section id="chat-api" aria-labelledby="chat-api-heading" hidden>
+      <div class="section-heading">
+        <h2 id="chat-api-heading">OpenAI-compatible API</h2>
+        <span id="chat-api-state" class="status" data-state="loading" role="status">Checking</span>
+      </div>
+      <div class="chat-api-panel">
+        <div>
+          <label for="chat-api-url">Base URL</label>
+          <input id="chat-api-url" readonly spellcheck="false">
+        </div>
+        <div>
+          <label for="chat-api-model">Model ID</label>
+          <input id="chat-api-model" readonly spellcheck="false">
+        </div>
+        <div>
+          <span class="field-label">API key</span>
+          <p class="chat-api-key">None required</p>
+        </div>
+        <p class="muted"><code id="chat-api-route">POST /v1/chat/completions</code></p>
+      </div>
+    </section>
+
+    <section id="runner" aria-labelledby="runner-heading">
+      <div class="section-heading">
+        <div>
+          <h2 id="runner-heading">GGUF runner</h2>
+          <p class="muted">Start a local llama.cpp server from your model library.</p>
+        </div>
+        <span id="runner-state" class="status" data-state="loading" role="status">Connecting</span>
+      </div>
+
+      <div class="runner-panel">
+        <form id="launch" autocomplete="off">
+          <label for="model">GGUF model</label>
+          <div class="model-field">
+            <select id="model" required disabled><option value="">Loading models…</option></select>
+            <button id="refresh" class="secondary" type="button">Refresh</button>
+          </div>
+          <div class="settings">
+            <div>
+              <label for="context">Context tokens</label>
+              <input id="context" type="number" min="256" max="262144" step="1" value="4096" required>
+            </div>
+            <div>
+              <label for="threads">CPU threads</label>
+              <input id="threads" type="number" min="1" step="1" value="4" required>
+            </div>
+            <div>
+              <label for="layers">GPU layers</label>
+              <input id="layers" type="number" min="0" max="999" step="1" value="0" aria-describedby="layers-help" required>
+              <small id="layers-help">0 uses CPU only</small>
+            </div>
+          </div>
+          <p id="memory-note" class="notice" hidden></p>
+          <p id="form-error" class="error" role="alert" hidden></p>
+          <div class="actions">
+            <button id="start" type="submit" disabled>Start model</button>
+            <button id="stop" type="button" class="secondary" disabled>Stop model</button>
+            <a id="open-runtime" class="runtime-link" target="_blank" rel="noopener noreferrer" hidden>Open llama.cpp ↗</a>
+          </div>
+        </form>
+        <div class="runner-info">
+          <div class="runner-current">
+            <h3>Current run</h3>
+            <p id="active-model">No model started here.</p>
+            <p id="runtime-meta" class="muted" hidden></p>
+            <div id="external" class="external" hidden>
+              <h3>Started outside this dashboard</h3>
+              <ul id="external-list"></ul>
+            </div>
+          </div>
+          <details class="logs" id="logs">
+            <summary>Server log</summary>
+            <pre id="log-content" tabindex="0">Output appears after you start a model.</pre>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
