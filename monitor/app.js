@@ -139,7 +139,14 @@ function updateControls() {
   const busy = busyStates.has(runner?.state);
   const disabled = pending || busy || !connected;
   $("model").disabled = disabled || models.length === 0;
-  for (const id of ["context", "threads", "layers"]) $(id).disabled = disabled;
+  const hasPresets = runner?.preset_supported &&
+    model?.id.split("/").at(-1) === "Ornith-1.5-35B-A3B-CRACK-Q5_K_M.gguf";
+  $("preset-field").hidden = !hasPresets;
+  $("preset").disabled = disabled || !hasPresets;
+  const preset = hasPresets && $("preset").value;
+  $("manual-settings").hidden = Boolean(preset);
+  for (const id of ["context", "threads", "layers"]) $(id).disabled = disabled || Boolean(preset);
+  put("start", preset ? "Start preset" : "Start model");
   $("start").disabled = disabled || !model || !runner?.binary;
   $("stop").disabled = pending || !connected || !["loading", "ready"].includes(runner?.state);
 
@@ -147,7 +154,12 @@ function updateControls() {
   if (model && telemetry && !busy) {
     const { ram, gpu } = telemetry;
     const offload = $("layers").valueAsNumber > 0 && Number.isFinite(gpu.vram_total);
-    if (model.bytes > ram.available) {
+    if (preset) {
+      const free = (gpu.vram_total - gpu.vram_used) / 1024 ** 2;
+      note = Number.isFinite(free) && free < 4000
+        ? "This preset needs about 4,000 MiB of free VRAM. Stop other GPU workloads before starting."
+        : "Uses Vulkan with about 4,000 MiB peak VRAM in testing.";
+    } else if (model.bytes > ram.available) {
       note = gib(model.bytes) + " model weights, " + gib(ram.available) +
         " RAM available. Loading may use swap or fail.";
     } else if (offload) {
@@ -281,6 +293,7 @@ $("launch").addEventListener("submit", (event) => {
   event.preventDefault();
   action("/api/start", {
     model: $("model").value,
+    preset: $("preset").disabled ? "" : $("preset").value,
     context: $("context").valueAsNumber,
     threads: $("threads").valueAsNumber,
     layers: $("layers").valueAsNumber,
@@ -290,6 +303,7 @@ $("stop").addEventListener("click", () => action("/api/stop", {}));
 $("refresh").addEventListener("click", loadModels);
 $("model").addEventListener("change", updateControls);
 $("layers").addEventListener("input", updateControls);
+$("preset").addEventListener("change", updateControls);
 for (const id of ["chat-api-url", "chat-api-model"]) {
   $(id).addEventListener("focus", (event) => event.currentTarget.select());
 }

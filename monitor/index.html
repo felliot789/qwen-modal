@@ -151,7 +151,15 @@
             <select id="model" required disabled><option value="">Loading models…</option></select>
             <button id="refresh" class="secondary" type="button">Refresh</button>
           </div>
-          <div class="settings">
+          <div id="preset-field" hidden>
+            <label for="preset">Launch preset</label>
+            <select id="preset">
+              <option value="">Manual settings</option>
+              <option value="ornith-q5-16k">Ornith Vulkan · 16K speed</option>
+              <option value="ornith-q5-64k">Ornith Vulkan · 64K context</option>
+            </select>
+          </div>
+          <div id="manual-settings" class="settings">
             <div>
               <label for="context">Context tokens</label>
               <input id="context" type="number" min="256" max="262144" step="1" value="4096" required>

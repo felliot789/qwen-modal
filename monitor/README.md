@@ -3,7 +3,8 @@
 Run the monitor on the Linux machine whose hardware you want to see. Python
 3.10+ serves the dashboard without third-party Python packages. Install
 `llama-server` to use the GGUF runner. The monitor checks
-`~/llama.cpp/build/bin/llama-server` and then `PATH`. Use
+`~/local-llm/llama.cpp/build/bin/llama-server`, then
+`~/llama.cpp/build/bin/llama-server`, and then `PATH`. Use
 `--llama-server /path/to/llama-server` to select a different build.
 
 ## Run locally
@@ -19,6 +20,11 @@ Use `--models-dir /path/to/models` to include another directory. Set GPU layers
 to zero for CPU-only inference. The runner controls one model process and
 stops it on a normal dashboard shutdown. It also lists other local
 `llama-server` processes for visibility.
+
+Select Ornith Q5_K_M to use the Vulkan presets when the llama.cpp build supports
+the shared MoE expert cache. The 16K speed preset requests a 2,352 MiB cache.
+The 64K preset requests 2,080 MiB. Both were tuned for the headless RX 6500 XT
+and used about 4,000 MiB of VRAM under load.
 
 The hardware dashboard samples every two seconds and holds two minutes of
 utilization history in memory. AMD GPU readings come from the driver. CPU and
@@ -96,3 +102,19 @@ tailscale funnel --bg --https=443 --set-path=/local-llm http://127.0.0.1:8792
 Clients use `https://<Funnel hostname>/local-llm/v1` as their base URL. Funnel
 makes this no-key endpoint reachable from the internet. Provide the same
 base URL with `--api-base-url` to display it in the dashboard.
+
+### Intel CPU and DRAM power
+
+When Linux limits RAPL energy counters to root, install the dedicated sampler from a trusted checkout. It publishes only rounded two-second watt averages to `/run/local-llm-rapl/power.json`. The dashboard runs as your regular user and ignores samples older than ten seconds.
+Set the service group to a private group belonging to the dashboard account. The
+runtime directory and snapshot grant that group read access.
+
+```sh
+sudo install -D -o root -g root -m 0644 monitor/rapl-sampler.py /usr/local/libexec/local-llm-rapl.py
+sudo install -o root -g root -m 0644 monitor/local-llm-rapl.service /etc/systemd/system/local-llm-rapl.service
+sudo install -d -o root -g root -m 0755 /etc/systemd/system/local-llm-rapl.service.d
+printf '[Service]\nGroup=%s\n' "$(id -gn)" |
+  sudo tee /etc/systemd/system/local-llm-rapl.service.d/access.conf >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now local-llm-rapl.service
+```

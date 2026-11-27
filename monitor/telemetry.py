@@ -1,6 +1,8 @@
 """Sample Linux kernel counters without changing hardware settings."""
 
 from collections import deque
+import json
+import math
 from pathlib import Path
 import os
 import re
@@ -14,6 +16,22 @@ PROC = Path("/proc")
 SYS = Path("/sys")
 INTERVAL = 2
 HISTORY = 120
+
+
+RAPL_SAMPLE = Path("/run/local-llm-rapl/power.json")
+
+
+def sampled_power(now):
+    try:
+        data = json.loads(RAPL_SAMPLE.read_text())
+        if not isinstance(data, dict) or not 0 <= now - data["monotonic"] <= 10:
+            return {}
+        return {
+            key: data[key] for key in ("cpu", "dram")
+            if type(data.get(key)) in (int, float) and math.isfinite(data[key]) and data[key] >= 0
+        }
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        return {}
 
 
 def read(path):
@@ -176,14 +194,17 @@ class Telemetry:
             float(line.split(":", 1)[1]) for line in read(PROC / "cpuinfo").splitlines()
             if line.startswith("cpu MHz")
         ]
+        rapl = sampled_power(now)
         cpu = {
             "name": self.cpu_name, "usage": cpu_usage, "threads": threads,
             "logical_count": os.cpu_count() or 1,
             "load": list(os.getloadavg()), "clock": sum(clocks) / len(clocks) if clocks else None,
             "temperature": max(package or [v for _, v in cpu_temps], default=None),
             "core_temps": [[k, v] for k, v in cpu_temps if k.startswith("Core ")],
-            "watts": self.power(self.packages, now),
-            "power_restricted": any(not os.access(p / "energy_uj", os.R_OK) for p in self.packages),
+            "watts": rapl["cpu"] if "cpu" in rapl else self.power(self.packages, now),
+            "power_restricted": "cpu" not in rapl and any(
+                not os.access(p / "energy_uj", os.R_OK) for p in self.packages
+            ),
         }
         mem = {k: int(v.split()[0]) * 1024 for k, v in fields(PROC / "meminfo", ":").items()}
         total = mem["MemTotal"]
@@ -193,8 +214,10 @@ class Telemetry:
             "usage": 100 * (total - available) / total,
             "swap_total": mem["SwapTotal"], "swap_used": mem["SwapTotal"] - mem["SwapFree"],
             "temperature": max((v for p in self.ram_sensors for v in temperatures(p).values()), default=None),
-            "watts": self.power(self.dram, now),
-            "power_restricted": any(not os.access(p / "energy_uj", os.R_OK) for p in self.dram),
+            "watts": rapl["dram"] if "dram" in rapl else self.power(self.dram, now),
+            "power_restricted": "dram" not in rapl and any(
+                not os.access(p / "energy_uj", os.R_OK) for p in self.dram
+            ),
         }
         gpu = self.gpu_data()
         fans = {}

@@ -66,11 +66,21 @@ def model_catalog(roots):
     return sorted(models.values(), key=lambda model: (model["name"].casefold(), model["id"]))
 
 
+ORNITH_Q5 = "Ornith-1.5-35B-A3B-CRACK-Q5_K_M.gguf"
+PRESETS = {
+    "ornith-q5-16k": (16384, 2352),
+    "ornith-q5-64k": (65536, 2080),
+}
+
+
 def find_llama(configured):
     if configured:
         return shutil.which(os.path.expanduser(configured))
-    built = Path.home() / "llama.cpp/build/bin/llama-server"
-    return shutil.which(str(built)) or shutil.which("llama-server")
+    for root in (Path.home() / "local-llm", Path.home()):
+        built = shutil.which(str(root / "llama.cpp/build/bin/llama-server"))
+        if built:
+            return built
+    return shutil.which("llama-server")
 
 
 def collect_logs(stream, lines):
@@ -103,6 +113,15 @@ def active_api_model(base_url):
 class Runner:
     def __init__(self, binary, port, roots):
         self.binary = binary
+        self.preset_supported = False
+        if binary:
+            try:
+                help_text = subprocess.run(
+                    [binary, "--help"], capture_output=True, timeout=5, check=True,
+                ).stdout
+                self.preset_supported = b"--moe-cache-mib" in help_text
+            except (OSError, subprocess.SubprocessError):
+                pass
         self.port = port
         self.roots = roots
         self.url = f"http://{LOOPBACK}:{port}"
@@ -120,9 +139,17 @@ class Runner:
         model = next((m for m in model_catalog(self.roots) if m["id"] == model_id), None)
         if model is None:
             raise ValueError("Choose a GGUF from the model library.")
+        preset = params.get("preset", "")
+        if not isinstance(preset, str) or (preset and preset not in PRESETS):
+            raise ValueError("Choose a supported launch preset.")
+        if preset and (not self.preset_supported or Path(model_id).name != ORNITH_Q5):
+            raise ValueError("This preset requires Ornith Q5_K_M and the expert-cache llama.cpp build.")
         context = params.get("context")
         threads = params.get("threads")
         layers = params.get("layers")
+        if preset:
+            context, cache_mib = PRESETS[preset]
+            threads, layers = 4, 99
         if type(context) is not int or not 256 <= context <= 262144:
             raise ValueError("Enter a context size between 256 and 262144.")
         if type(threads) is not int or not 1 <= threads <= (os.cpu_count() or 1):
@@ -145,7 +172,18 @@ class Runner:
                 "--ctx-size", str(context), "--threads", str(threads), "--parallel", "1",
                 "--gpu-layers", str(layers), "--fit", "off", "--jinja",
             ]
-            if layers == 0:
+            if preset:
+                command.extend([
+                    "--device", "Vulkan0", "--flash-attn", "on",
+                    "--cache-type-k", "q4_0", "--cache-type-v", "q4_0",
+                    "--n-cpu-moe", "40", "--no-op-offload", "--load-mode", "mmap",
+                    "--no-host", "--no-repack", "--batch-size", "2048", "--ubatch-size", "128",
+                    "--cache-ram", "0", "--no-mmproj", "--offline", "--ctx-checkpoints", "0",
+                    "--no-context-shift", "--no-cache-idle-slots", "--spec-type", "none",
+                    "--reasoning", "off", "--perf", "--moe-cache-mib", str(cache_mib),
+                    "--moe-cache-cpu-share", "0.75",
+                ])
+            elif layers == 0:
                 command.extend(["--device", "none", "--no-op-offload"])
             env = {key: value for key, value in os.environ.items() if not key.startswith("LLAMA_ARG_")}
             try:
@@ -213,7 +251,7 @@ class Runner:
             return {
                 "state": self.state, "model": self.model,
                 "pid": self.process.pid if self.process else None, "exit_code": self.exit_code,
-                "url": self.url, "binary": bool(self.binary),
+                "url": self.url, "binary": bool(self.binary), "preset_supported": self.preset_supported,
                 "logs": b"".join(self.logs.copy())[-40000:].decode(errors="replace"),
             }
 

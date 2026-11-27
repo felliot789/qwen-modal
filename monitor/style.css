@@ -128,6 +128,7 @@ button:disabled, select:disabled { opacity: 0.55; cursor: default; }
 button:hover:enabled { filter: brightness(0.92); }
 button[type="submit"] { background: var(--green); border-color: var(--green); color: var(--inset); }
 button.secondary { background: var(--soft); }
+#preset-field { margin-top: 0.75rem; }
 .settings { margin-top: 0.75rem; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.6rem; }
 small { font-size: 0.76rem; color: var(--muted); }
 .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.9rem; }
